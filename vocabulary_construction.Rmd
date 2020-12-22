@@ -1,0 +1,101 @@
+---
+title: "Appendix - Vocabulary Construction"
+author: "Ahmad Al-Dhalaan"
+date: "11/27/2020"
+output: html_document
+---
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+library(text2vec)
+library(glmnet)
+library(slam)
+```
+
+We begin by loading the train set reviews of the first split and removing the HTML tags:
+
+```{r}
+j = 1
+setwd(paste("split_", j, sep=""))
+train = read.table("train.tsv",
+                   stringsAsFactors = FALSE,
+                   header = TRUE)
+train$review = gsub('<.*?>', ' ', train$review)
+```
+
+We then construct the document-term matrix. We specify our stop words, lower case the terms, create n-grams (one to four) and remove very infrequent/frequent terms to avoid outliers/overfitting. 
+
+```{r}
+stop_words = c("i", "me", "my", "myself", 
+               "we", "our", "ours", "ourselves", 
+               "you", "your", "yours", 
+               "their", "they", "his", "her", 
+               "she", "he", "a", "an", "and",
+               "is", "was", "are", "were", 
+               "him", "himself", "has", "have", 
+               "it", "its", "the", "us")
+it_train = itoken(train$review,
+                  preprocessor = tolower, 
+                  tokenizer = word_tokenizer)
+tmp.vocab = create_vocabulary(it_train, 
+                              stopwords = stop_words, 
+                              ngram = c(1L,4L))
+tmp.vocab = prune_vocabulary(tmp.vocab, term_count_min = 10,
+                             doc_proportion_max = 0.5,
+                             doc_proportion_min = 0.001)
+dtm_train  = create_dtm(it_train, vocab_vectorizer(tmp.vocab))
+```
+
+Using this document-term matrix, we were unable to satisfy the AUC benchmark for the first split. Therefore, we used a two-sample t-test and chose the top 2000 terms with the largest t-statistics. 
+
+```{r}
+v.size = dim(dtm_train)[2]
+ytrain = train$sentiment
+
+summ = matrix(0, nrow=v.size, ncol=4)
+summ[,1] = colapply_simple_triplet_matrix(
+  as.simple_triplet_matrix(dtm_train[ytrain==1, ]), mean)
+summ[,2] = colapply_simple_triplet_matrix(
+  as.simple_triplet_matrix(dtm_train[ytrain==1, ]), var)
+summ[,3] = colapply_simple_triplet_matrix(
+  as.simple_triplet_matrix(dtm_train[ytrain==0, ]), mean)
+summ[,4] = colapply_simple_triplet_matrix(
+  as.simple_triplet_matrix(dtm_train[ytrain==0, ]), var)
+
+n1 = sum(ytrain); 
+n = length(ytrain)
+n0 = n - n1
+
+myp = (summ[,1] - summ[,3])/
+  sqrt(summ[,2]/n1 + summ[,4]/n0)
+
+words = colnames(dtm_train)
+id = order(abs(myp), decreasing=TRUE)[1:2000]
+```
+
+Using the top 2000 words, we create a new document-term matrix for training.
+
+```{r}
+vectorizer = vocab_vectorizer(create_vocabulary(words[id], 
+                                                ngram = c(1L, 2L)))
+
+dtm_train = create_dtm(it_train, vectorizer)
+```
+
+Using Lasso regression, we fit a model using the 2000 terms as predictors and sentiment as the response.
+
+```{r}
+tmpfit = glmnet(x = dtm_train, 
+                y = train$sentiment, 
+                alpha = 1,
+                family='binomial')
+tmpfit$df
+```
+The "df" above outputs the number of predictors(terms) used for varying levels of $\lambda$. The benchmark is 1000 terms, so we choose the 44th column, which has 997 terms. These terms will constitute our vocabulary and are saved to be used for training and testing all five splits.
+
+```{r}
+myvocab = colnames(dtm_train)[which(tmpfit$beta[, 44] != 0)]
+
+write.table(myvocab, file="myvocab.txt", 
+            row.names = FALSE,
+            sep='\n')
+```
